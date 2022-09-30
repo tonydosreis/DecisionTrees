@@ -1,5 +1,9 @@
 import numpy as np
 
+def assert_nonnegative_int(x):
+    assert (type(x) == int) or (type(x) == np.int64) or (type(x) == np.int32)
+    assert x >= 0
+
 #tests if the x[:-1] is always associated with the same x[-1]
 #in other words, if the same input always has the same output
 def isDeterministic(X):
@@ -21,24 +25,30 @@ def calc_entropy(P):
 
     return result
 
-def assert_nonnegative_int(x):
-    assert (type(x) == int) or (type(x) == np.int64) or (type(x) == np.int32)
-    assert x >= 0
-
 class Node():
     id = 0
     def __init__(self):
         self.id = Node.id
         Node.id += 1
 
-class LeafNode(Node):
-    def __init__(self, cla):
-        super().__init__()
+    def set_class(self, cla):
         assert_nonnegative_int(cla)
         self.cla = cla
 
     def get_class(self):
         return self.cla
+
+class ClassificationNode(Node):
+    def __init__(self, cla):
+        super().__init__()
+        self.set_class(cla)
+
+    def add_parent(self, node):
+        assert(type(node) == DecisionNode)
+        self.parent = node
+
+    def get_parent(self):
+        return self.parent
 
     def __call__(self):
         return self.cla
@@ -46,7 +56,7 @@ class LeafNode(Node):
     def __str__(self):
         return f"class: {self.cla}" 
 
-class NonLeafNode(Node):
+class DecisionNode(Node):
 
     def __init__(self, attr_index = 0):
         super().__init__()
@@ -55,7 +65,8 @@ class NonLeafNode(Node):
         self.children = []
 
     def add_child(self, child):
-        assert (type(child) == NonLeafNode) or (type(child) == LeafNode)
+        assert (type(child) == DecisionNode) or (type(child) == ClassificationNode)
+        child.add_parent(self)
         self.children.append(child)
 
     def add_children(self, children):
@@ -65,12 +76,19 @@ class NonLeafNode(Node):
     def get_children(self):
         return self.children
 
+    def add_parent(self, node):
+        assert(type(node) == DecisionNode)
+        self.parent = node
+
+    def get_parent(self):
+        return self.parent
+
     def __call__(self, x):
         next_node_index = x[self.attr_index]
 
         next_node = self.children[next_node_index]
 
-        if( type(next_node) == NonLeafNode):
+        if( type(next_node) == DecisionNode):
             return next_node(x)
         else:
             return next_node()
@@ -97,7 +115,7 @@ class DecisionTree():
     def __str__(self):
         return str(self.root_node)
 
-    def learn(self, X, Y, tokenizer):
+    def learn(self, X, Y, tokenizer, thresh = 0):
 
         #Receives X and Y and selects those in X for which attr_i = poss
         #Returns Correspoding X_part and Y_part
@@ -113,7 +131,7 @@ class DecisionTree():
             P = counts/counts.sum()
             return uniques, P
 
-        def get_best_attr(X,Y, attr_list, tokenizer):
+        def get_best_attr(X,Y, attr_list, tokenizer, thresh = 0):
 
             tot_n = len(Y)
 
@@ -134,7 +152,7 @@ class DecisionTree():
                         curr_entropy = (n/tot_n)*calc_entropy(P)
                         curr_avg_entropy += curr_entropy
 
-                        if(curr_entropy == 0):
+                        if(curr_entropy <= thresh):
                             maj_class = uniques[np.argmax(P)]
                             curr_leaf_nodes[attr_poss] = maj_class
 
@@ -152,48 +170,65 @@ class DecisionTree():
 
             return best_attr, final_leaf_nodes
 
-        def build_tree(node,X,Y, attr_list, tokenizer):
+        def build_tree(node,X,Y, attr_list, tokenizer, thresh):
+
+            #decision node class is mahority class
+            uniques , P = get_prob(Y)
+            maj_class = uniques[np.argmax(P)]
+            node.cla = maj_class
 
             attr_list = attr_list.copy()
 
-            best_attr, leaf_nodes = get_best_attr(X,Y,attr_list, tokenizer)
+            best_attr, leaf_nodes = get_best_attr(X,Y,attr_list, tokenizer, thresh)
 
             node.attr_index = best_attr
             attr_list.remove(best_attr)
 
             for i in tokenizer.getAttTokenVals(best_attr):
                 if(i in leaf_nodes):
-                    new_node = LeafNode(leaf_nodes[i])
+                    new_node = ClassificationNode(leaf_nodes[i])
                 else:
-                    new_node = NonLeafNode()
+                    new_node = DecisionNode()
                     X_part, Y_part = partition(X,Y,best_attr,i)
-                    build_tree(new_node,X_part,Y_part,attr_list, tokenizer)
+                    build_tree(new_node,X_part,Y_part,attr_list, tokenizer, thresh)
 
                 node.add_child(new_node)
 
         attr_list = [ i for i in range(X.shape[1])]
 
-        self.root_node = NonLeafNode()
-        build_tree(self.root_node,X,Y,attr_list, tokenizer)
+        self.root_node = DecisionNode()
+        build_tree(self.root_node,X,Y,attr_list, tokenizer, thresh)
         print("Done Building tree!")
 
     def evaluatePerformace(self, X, Y):
         Y_hat = self(X)
         temp = (Y_hat == Y)
         acc = temp.sum()/len(temp)
-        return acc    
+        return acc
 
-    def str_helper(node, level = 0):
-        string = "\n" + "\t"*level +"-" +str(node)
+    def numberOfNodes(self):
+        def numberOfNodesHelper(node):
+            if( type(node) == ClassificationNode ):
+                return 1
+            else:
+                n = 1
+                for child in node.get_children():
+                    n += numberOfNodesHelper(child)
+                return n
 
-        if(type(node) == NonLeafNode):
-            for child in node.children:
-                string += DecisionTree.str_helper(child, level + 1)
-
-        return string
+        return numberOfNodesHelper(self.root_node)
 
     def __str__(self):
-        string = DecisionTree.str_helper(self.root_node)
+        def strHelper(node, level = 0):
+            string = "\n" + "\t"*level +"-" +str(node)
+
+            if(type(node) == DecisionNode):
+                for child in node.children:
+                    string += strHelper(child, level + 1)
+
+            return string
+
+        string = strHelper(self.root_node)
         return string
 
 def read_csv(path):
@@ -258,6 +293,33 @@ class Tokenizer():
 
         return string
 
+def DataDivider(X, proportions, shuffle = True):
+
+    assert (type(proportions) == list) or (type(proportions) == tuple)
+    assert sum(proportions) == 1
+
+    if(shuffle):
+        np.random.shuffle(X)
+
+    n = X.shape[0]
+    sizes = [ int(prop*n) for prop in proportions]
+    rest = n - sum(sizes)
+
+    for i in range(rest): sizes[i] += 1
+
+    out = []
+
+    left_i = 0
+    for sz in sizes:
+        right_i = sz + left_i
+        out.append(X[left_i:right_i,:])
+        left_i = right_i
+
+    return out
+
+def splitInputOutput(data):
+    return data[:,:-1], data[:,-1]
+
 class KfoldCrossValidator():
     def __init__(self, data, k):
 
@@ -300,7 +362,7 @@ class KfoldCrossValidator():
             return train_set, test_set
             
         else:
-            raise StopIteration
+            raise StopIteration       
 
 if __name__  == "__main__":
 
@@ -309,6 +371,7 @@ if __name__  == "__main__":
     tokenizer = Tokenizer(data)
     data_tokens = tokenizer.word2token(data)
 
+    """
     n_folds = 7
 
     kfold = KfoldCrossValidator(data_tokens, n_folds)
@@ -336,4 +399,18 @@ if __name__  == "__main__":
 
     print(f"Average test accuracy: {np.mean(avg_test_acc):.3f}")
     print()
+
+    """
+
+    [train_data, test_data] = DataDivider(data_tokens, [.5,.5])
+    train_x, train_y = splitInputOutput(train_data)
+    test_x, test_y = splitInputOutput(test_data)
+
+    decisionTree = DecisionTree()
+
+    thresh = .3
+    decisionTree.learn(train_x, train_y, tokenizer, thresh)
+    print(decisionTree.evaluatePerformace(test_x,test_y))
+    print(decisionTree.numberOfNodes())
+
     print(decisionTree)
