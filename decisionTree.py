@@ -118,7 +118,7 @@ class DecisionTree():
     def learn(self, X, Y, tokenizer, thresh = 0):
 
         #Receives X and Y and selects those in X for which attr_i = poss
-        #Returns Correspoding X_part and Y_part
+        #Returns Corresponding X_part and Y_part
         def partition(X,Y, attr_i, poss):
             mask  = (X[:,attr_i] == poss)
             X_part = X[mask]
@@ -172,7 +172,7 @@ class DecisionTree():
 
         def build_tree(node,X,Y, attr_list, tokenizer, thresh):
 
-            #decision node class is mahority class
+            #decision node class is majority class
             uniques , P = get_prob(Y)
             maj_class = uniques[np.argmax(P)]
             node.cla = maj_class
@@ -200,7 +200,7 @@ class DecisionTree():
         build_tree(self.root_node,X,Y,attr_list, tokenizer, thresh)
         print("Done Building tree!")
 
-    def evaluatePerformace(self, X, Y):
+    def evaluatePerformance(self, X, Y):
         Y_hat = self(X)
         temp = (Y_hat == Y)
         acc = temp.sum()/len(temp)
@@ -217,6 +217,28 @@ class DecisionTree():
                 return n
 
         return numberOfNodesHelper(self.root_node)
+
+    def getDeepestDecisionNodes(self):
+        def getDeepestDecisionNodesHelper(node, depth = 0):
+            if(type(node) == ClassificationNode):
+                return { (node.get_parent(),depth - 1),}
+            else:
+                deepestDecisionNodes = set()
+                for child in node.get_children():
+                    deepestDecisionNodes.update( getDeepestDecisionNodesHelper(child,depth + 1) )
+
+                new_deepestDecisionNodes = set()
+                
+                max_depth = max(deepestDecisionNodes, key = lambda x : x[1])[1]
+
+                for node, depth in deepestDecisionNodes:
+                    if depth == max_depth:
+                        new_deepestDecisionNodes.add( (node,depth) )
+
+                return new_deepestDecisionNodes
+
+        dp = getDeepestDecisionNodesHelper(self.root_node)
+        return [node for node, _ in dp]
 
     def __str__(self):
         def strHelper(node, level = 0):
@@ -243,30 +265,79 @@ def read_csv(path):
     return result
 
 class Tokenizer():
+    """Converts  between categorical values and integer values(tokens)
+    
+    Attributes
+    ----------
+    word2token_dic: dict(str:int)
+        dictionary with categories as keys and associated integers as values
+    token2word_dic: dict(int:str)
+        same as word2token_dic but with keys and values switched
 
-    def __init__(self, X):
+    Methods
+    -------
+    convertWord2token( X : list of list of strings) --> list of list of numbers
+        converts dataset in rows are data points and columns are features from categorical values to integer values
 
-        n_rows = len(X)
-        n_cols = len(X[0])
+    getAttTokenVals(attr_index : int) --> list of ints
+        given attribute index, returns all of the possible integer values of that attribute, sorted
+    """
 
-        uniques = [ set() for i in range(n_cols)]
+    def __init__(self, X, word2token = None):
+        """Defines an association between categories and integers.
 
-        for c in range(n_cols):
-            for r in range(n_rows):
-                uniques[c].add(X[r][c])
+        There are two approaches here:
+        1: If word2token is specified, then the user is responsible for defining the association between categories and integers
+        through the definition of word2token.
+        2: If word2token is not specified then the association is learned automatically from the data. The association learned here 
+        is arbitrary, the numbers are associated to the categories based on the order they appear in the row of the dataset. This 
+        method is not appropriate if there is some order to the categories or if the associated numbers should capture some 
+        relationship among the categorical values. In this case approach 1 is recommended. 
+        
+        Parameters
+        ----------
+            X : list of lists of strings, representing a matrix of strings
+                rows represents different data points and columns represent different features.
+            word2token : list of dictionaries, each dictionary has string keys and integer values - Optional, default is None
+                This corresponds to the mapping between categorical values and integers. Each index of the list corresponds to
+                a feature of the data X. There is a separate dictionary for each feature describing the association between
+                categories (keys) and integers (values) 
+        """
 
-        self.word2token_dic = [ {} for i in range(len(uniques))]
-        self.token2word_dic = [ {} for i in range(len(uniques))]
+        if word2token != None:
+            self.word2token = word2token
+            self.token2word = []
+            for dic in self.word2token:
+                self.token2word.append( {val : key for key, val in dic.items()} )
+        else:
+            n_rows, n_cols = len(X), len(X[0])
+            self.word2token, self.token2word = [], []
 
-        for i, unique in enumerate(uniques):
-            for j, word in enumerate(sorted(list(unique))):
-                self.word2token_dic[i][word] = j
+            for c in range(n_cols):
+                self.word2token.append(dict())
+                self.token2word.append(dict())
+                token = 0
+                for r in range(n_rows):
+                    curr_word = X[r][c]
+                    if( curr_word not in self.word2token[c].keys()):
+                        self.word2token[c][curr_word] = token
+                        self.token2word[c][token] = curr_word
+                        token += 1
 
-        for i, atrr in enumerate(self.word2token_dic):
-            for key, value in atrr.items():
-                self.token2word_dic[i][value] = key
+    def convertWord2token(self,X):
+        """Converts data from categorical values to numerical values
 
-    def word2token(self,X):
+        self.word2token_dic is used for converting from categories to numerical values
+        
+        Parameter
+        ---------
+            X : list of lists of strings, representing a matrix of strings
+                rows represents different data points and columns represent different features
+        Returns
+        -------
+            tokens: list of lists of int, representing matrix o integers
+                rows represents different data points and columns represent different features
+        """
 
         n_rows = len(X)
         n_cols = len(X[0])
@@ -275,19 +346,20 @@ class Tokenizer():
 
         for i in range(n_rows):
             for j in range(n_cols):
-                tokens[i,j] = self.word2token_dic[j][X[i][j]]
+                tokens[i,j] = self.word2token[j][X[i][j]]
 
         return tokens
 
-    #given attribute index, return all possible values
     def getAttTokenVals(self, attr_i):
-        return sorted(list(self.token2word_dic[attr_i].keys()))
+        """given attribute index, return all possible values sorted"""
+
+        return sorted(list(self.token2word[attr_i].keys()))
 
     def __str__(self):
 
         string = ""
 
-        for attr in self.word2token_dic:
+        for attr in self.word2token:
             string += str(attr)
             string += "\n"
 
@@ -368,8 +440,11 @@ if __name__  == "__main__":
 
     data = read_csv("car_evaluation.csv")
 
-    tokenizer = Tokenizer(data)
-    data_tokens = tokenizer.word2token(data)
+    word2token = [ {'low':0, 'med':1, 'high': 2, 'vhigh':3}, {'low':0, 'med':1, 'high': 2, 'vhigh':3}, {'2':0, '3':1, '4':2, '5more':3}, 
+    {'2':0, '4':1, 'more':2}, {'small':0, 'med':1, 'big':2}, {'low':0, 'med':1, 'high':2}, {'unacc': 0, 'acc':1, 'good':2, 'vgood':3} ]
+
+    tokenizer = Tokenizer(data, word2token)
+    data_tokens = tokenizer.convertWord2token(data)
 
     """
     n_folds = 7
@@ -389,8 +464,8 @@ if __name__  == "__main__":
         decisionTree = DecisionTree()
         decisionTree.learn(X_train,Y_train, tokenizer)
 
-        train_acc = decisionTree.evaluatePerformace(X_train, Y_train)
-        test_acc = decisionTree.evaluatePerformace(X_test, Y_test)
+        train_acc = decisionTree.evaluatePerformance(X_train, Y_train)
+        test_acc = decisionTree.evaluatePerformance(X_test, Y_test)
         avg_test_acc.append(test_acc)
 
         print(f"Train set acc: {train_acc:.3f}")
@@ -410,7 +485,7 @@ if __name__  == "__main__":
 
     thresh = .3
     decisionTree.learn(train_x, train_y, tokenizer, thresh)
-    print(decisionTree.evaluatePerformace(test_x,test_y))
+    print(decisionTree.evaluatePerformance(test_x,test_y))
     print(decisionTree.numberOfNodes())
 
     print(decisionTree)
