@@ -4,9 +4,8 @@ def assert_nonnegative_int(x):
     assert (type(x) == int) or (type(x) == np.int64) or (type(x) == np.int32)
     assert x >= 0
 
-#tests if the x[:-1] is always associated with the same x[-1]
-#in other words, if the same input always has the same output
 def isDeterministic(X):
+    """tests if the x[:-1] is always associated with the same x[-1], in other words, if the same input always has the same output"""
     seen = dict()
     for x in X:
         x = tuple(x)
@@ -17,13 +16,43 @@ def isDeterministic(X):
                 return False
     return True
 
+def get_prob(X):
+    """Receives a list of elements X and calculates the probability distribution P"""
+    uniques, counts = np.unique(X, return_counts=True)
+    P = counts/counts.sum()
+    return uniques, P
+
 def calc_entropy(P):
-    #P is one dimensional array of probabilities
+    """Calculates entropy of discrete probability distribution P
+    
+    Parameters
+    ----------
+    P: one dimensional array of floats
+
+    returns
+    -------
+    entropy: float
+    """
+
     result = 0
     for p in P:
         result -= p*np.log(p)
 
     return result
+
+def balancedAcc(y, y_hat):
+    classes, counts = np.unique(y, return_counts = True)
+    bacc = 0
+
+    for cla, count in zip(classes, counts):
+       temp1 = y == cla
+       temp2 = y_hat == cla
+       n = temp1.sum()
+       acc = (temp1&temp2).sum()/n
+
+       bacc += (1/count)*acc
+
+    return bacc
 
 class Node():
     id = 0
@@ -116,6 +145,7 @@ class DecisionTree():
         return str(self.root_node)
 
     def learn(self, X, Y, tokenizer, thresh = 0):
+        """Learns decision tree from data following ID3 algorithm"""
 
         #Receives X and Y and selects those in X for which attr_i = poss
         #Returns Corresponding X_part and Y_part
@@ -125,12 +155,6 @@ class DecisionTree():
             Y_part = Y[mask]
             return X_part, Y_part
 
-        #Receives a list of elements X and calculated the probability distribution P
-        def get_prob(X):
-            uniques, counts = np.unique(X, return_counts=True)
-            P = counts/counts.sum()
-            return uniques, P
-
         def get_best_attr(X,Y, attr_list, tokenizer, thresh = 0):
 
             tot_n = len(Y)
@@ -138,6 +162,9 @@ class DecisionTree():
             best_attr = None
             min_entropy = np.inf
             final_leaf_nodes = None
+
+            _ , base_p = get_prob(Y)
+            base_entropy = calc_entropy(base_p)
 
             for attr_i in attr_list:
                 curr_avg_entropy = 0
@@ -149,10 +176,13 @@ class DecisionTree():
 
                     if( len(Y_part) > 0 ):
                         uniques, P = get_prob(Y_part)
-                        curr_entropy = (n/tot_n)*calc_entropy(P)
-                        curr_avg_entropy += curr_entropy
 
-                        if(curr_entropy <= thresh):
+                        curr_entropy = calc_entropy(P)
+                        curr_avg_entropy += (n/tot_n)*curr_entropy
+
+                        info_gain = (n/tot_n)*(base_entropy - curr_entropy)
+
+                        if( ( (info_gain <= thresh) and (info_gain > 0)  ) or (curr_entropy == 0) ):
                             maj_class = uniques[np.argmax(P)]
                             curr_leaf_nodes[attr_poss] = maj_class
 
@@ -182,6 +212,7 @@ class DecisionTree():
             best_attr, leaf_nodes = get_best_attr(X,Y,attr_list, tokenizer, thresh)
 
             node.attr_index = best_attr
+
             attr_list.remove(best_attr)
 
             for i in tokenizer.getAttTokenVals(best_attr):
@@ -197,16 +228,55 @@ class DecisionTree():
         attr_list = [ i for i in range(X.shape[1])]
 
         self.root_node = DecisionNode()
+        self.root_node.parent = None
         build_tree(self.root_node,X,Y,attr_list, tokenizer, thresh)
         print("Done Building tree!")
 
-    def evaluatePerformance(self, X, Y):
+    def replace_node(self, old_node, new_node):
+        """replaces old node in tree with new node"""
+
+        parent_node = old_node.get_parent()
+        for i, node in enumerate(parent_node.get_children()):
+            if node == old_node:
+                parent_node.children[i] = new_node
+                new_node.add_parent(parent_node)
+                break
+
+    def prune(self, val_x, val_y):
+        """currently does bottom up reduced-error pruning"""
+
+        baseline_acc = self.evaluateAcc(val_x,val_y)
+
+        lp = self.getLeafParents()
+
+        while( len(lp) > 0 ):
+            old_node = lp.pop()
+
+            if(old_node.get_parent() != None):
+                lp.add(old_node.get_parent())
+
+                new_node = ClassificationNode(old_node.cla)
+                self.replace_node(old_node, new_node)
+
+                new_acc = self.evaluateAcc(val_x,val_y)
+
+                if(new_acc < baseline_acc):
+                    self.replace_node(new_node, old_node)
+
+    def evaluateBalancedAcc(self, X, Y):
+        """Calculates balanced accuracy given input and output, useful if there is class imbalance"""
+
         Y_hat = self(X)
-        temp = (Y_hat == Y)
-        acc = temp.sum()/len(temp)
-        return acc
+        return balancedAcc(Y, Y_hat)
+
+    def evaluateAcc(self, X, Y):
+        """Calculates accuracy given input and output, useful if there is not class imbalance"""
+
+        Y_hat = self(X)
+        return (Y_hat == Y).sum()/len(Y)
 
     def numberOfNodes(self):
+        """returns the number of nodes in the tree"""
         def numberOfNodesHelper(node):
             if( type(node) == ClassificationNode ):
                 return 1
@@ -218,34 +288,27 @@ class DecisionTree():
 
         return numberOfNodesHelper(self.root_node)
 
-    def getDeepestDecisionNodes(self):
-        def getDeepestDecisionNodesHelper(node, depth = 0):
+    def getLeafParents(self):
+        """Returns the non-leaf nodes that are parents of leaf nodes"""
+        def getLeafParentsHelper(node):
             if(type(node) == ClassificationNode):
-                return { (node.get_parent(),depth - 1),}
+                return { node.get_parent() }
             else:
                 deepestDecisionNodes = set()
                 for child in node.get_children():
-                    deepestDecisionNodes.update( getDeepestDecisionNodesHelper(child,depth + 1) )
+                    deepestDecisionNodes.update( getLeafParentsHelper(child) )
 
-                new_deepestDecisionNodes = set()
-                
-                max_depth = max(deepestDecisionNodes, key = lambda x : x[1])[1]
+                return deepestDecisionNodes
 
-                for node, depth in deepestDecisionNodes:
-                    if depth == max_depth:
-                        new_deepestDecisionNodes.add( (node,depth) )
-
-                return new_deepestDecisionNodes
-
-        dp = getDeepestDecisionNodesHelper(self.root_node)
-        return [node for node, _ in dp]
+        lp = getLeafParentsHelper(self.root_node)
+        return lp
 
     def __str__(self):
         def strHelper(node, level = 0):
             string = "\n" + "\t"*level +"-" +str(node)
 
             if(type(node) == DecisionNode):
-                for child in node.children:
+                for i, child in enumerate(node.children):
                     string += strHelper(child, level + 1)
 
             return string
@@ -474,18 +537,32 @@ if __name__  == "__main__":
 
     print(f"Average test accuracy: {np.mean(avg_test_acc):.3f}")
     print()
-
     """
 
-    [train_data, test_data] = DataDivider(data_tokens, [.5,.5])
+    [train_data,val_data ,test_data] = DataDivider(data_tokens, [.5,.3,.2])
+
     train_x, train_y = splitInputOutput(train_data)
+    val_x, val_y = splitInputOutput(val_data)
     test_x, test_y = splitInputOutput(test_data)
 
     decisionTree = DecisionTree()
 
-    thresh = .3
+    thresh = 0
     decisionTree.learn(train_x, train_y, tokenizer, thresh)
-    print(decisionTree.evaluatePerformance(test_x,test_y))
-    print(decisionTree.numberOfNodes())
+
+    uniques, P = get_prob(test_y)
+
+    print(f"\nBaseline acc: {100*np.max(P):.2f}%")
+    print("Before prune")
+    print(f"\tNumber of nodes: {decisionTree.numberOfNodes()}")
+    print(f"\tTest set acc: {100*decisionTree.evaluateAcc(test_x,test_y):.2f}%")
+
+    print(decisionTree)
+
+    decisionTree.prune(val_x,val_y)
+
+    print("After prune")
+    print(f"\tNumber of nodes: {decisionTree.numberOfNodes()}")
+    print(f"\tTest set acc: {100*decisionTree.evaluateAcc(test_x,test_y):.2f}%")
 
     print(decisionTree)
