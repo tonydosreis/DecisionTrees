@@ -1,3 +1,4 @@
+from asyncio import _get_running_loop
 import numpy as np
 
 def assert_nonnegative_int(x):
@@ -82,14 +83,14 @@ class ClassificationNode(Node):
     def __call__(self):
         return self.cla
 
-    def __str__(self):
-        return f"class: {self.cla}" 
-
 class DecisionNode(Node):
 
-    def __init__(self, attr_index = 0):
+    def __init__(self, split_type = "equality", attr_index = 0):
         super().__init__()
         assert_nonnegative_int(attr_index)
+        assert split_type in ["equality", "inequality"]
+        self.parent = None
+        self.split_type = split_type
         self.attr_index = attr_index
         self.children = []
 
@@ -113,20 +114,23 @@ class DecisionNode(Node):
         return self.parent
 
     def __call__(self, x):
-        next_node_index = x[self.attr_index]
-
-        next_node = self.children[next_node_index]
+        if(self.split_type == "equality"):
+            next_node_index = x[self.attr_index]
+            next_node = self.children[next_node_index]
+        else:
+            if (x[self.attr_index] <= self.thresh ):
+                next_node = self.children[0]
+            else:
+                next_node = self.children[1]
 
         if( type(next_node) == DecisionNode):
             return next_node(x)
         else:
             return next_node()
 
-    def __str__(self):
-        return f"Attr: {self.attr_index}"
-
 class DecisionTree(): 
-    def __init__(self):
+    def __init__(self, tokenizer):
+        self.tokenizer = tokenizer
         self.root_node = None
 
     def __call__(self, x):
@@ -141,41 +145,89 @@ class DecisionTree():
                 y_hat[i] = self(x_row)
             return y_hat
 
-    def __str__(self):
-        return str(self.root_node)
-
-    def learn(self, X, Y, tokenizer, thresh = 0):
+    def learn(self, X, Y, thresh = 0, split_type = "equality"):
         """Learns decision tree from data following ID3 algorithm"""
 
         #Receives X and Y and selects those in X for which attr_i = poss
         #Returns Corresponding X_part and Y_part
-        def partition(X,Y, attr_i, poss):
-            mask  = (X[:,attr_i] == poss)
+        def partition(X,Y, attr_i, val, type = "e"):
+            assert type in ["e", "le", "g"]
+            if(type == "e" ):
+                mask  = X[:,attr_i] == val
+            elif(type == "le"):
+                mask  = X[:,attr_i] <= val
+            else:
+                mask  = X[:,attr_i] > val
             X_part = X[mask]
             Y_part = Y[mask]
             return X_part, Y_part
 
-        def get_best_attr(X,Y, attr_list, tokenizer, thresh = 0):
+        def get_best_attr_bin_split(X,Y, attr_list, thresh = 0):
+
+            n_tot = len(Y)
+
+            best_attr = None
+            best_thresh = None
+            min_entropy = np.inf
+            final_leaf_nodes = None
+
+            for attr_i in attr_list:
+
+                for val in self.tokenizer.getAttTokenVals(attr_i)[:-1]:
+
+                    _, Y_part_le = partition(X,Y,attr_i,val,"le")
+                    _, Y_part_g = partition(X,Y,attr_i,val,"g")
+
+                    nle = len(Y_part_le)
+                    ng = len(Y_part_g)
+
+                    if(  nle*ng > 0 ):
+                        classes_le, P_le = get_prob(Y_part_le)
+                        classes_g, P_g = get_prob(Y_part_g)
+                        entropy_g = calc_entropy(P_g)
+                        entropy_le = calc_entropy(P_le)
+                        curr_entropy = (nle/n_tot)*entropy_le + (ng/n_tot)*entropy_g
+
+                        if(curr_entropy < min_entropy):
+                            min_entropy = curr_entropy
+                            best_attr = attr_i
+                            best_thresh = val
+
+                            final_leaf_nodes = {}
+
+                            if( len(attr_list) == 1 ):
+                                final_leaf_nodes[0] = classes_le[np.argmax(P_le)]
+                                final_leaf_nodes[1] = classes_g[np.argmax(P_g)]
+                            else:  
+                                if( entropy_le == 0 ):
+                                    final_leaf_nodes[0] = classes_le[np.argmax(P_le)]
+                                if(entropy_g == 0):
+                                    final_leaf_nodes[1] = classes_g[np.argmax(P_g)]
+
+            return best_attr, best_thresh, final_leaf_nodes
+
+
+        def get_best_attr(X,Y, attr_list, thresh = 0):
 
             tot_n = len(Y)
+
+            base_classes , base_P = get_prob(Y)
+            base_entropy = calc_entropy(base_P)
 
             best_attr = None
             min_entropy = np.inf
             final_leaf_nodes = None
 
-            _ , base_p = get_prob(Y)
-            base_entropy = calc_entropy(base_p)
-
             for attr_i in attr_list:
                 curr_avg_entropy = 0
                 curr_leaf_nodes = {}
 
-                for attr_poss in tokenizer.getAttTokenVals(attr_i):
+                for attr_poss in self.tokenizer.getAttTokenVals(attr_i):
                     _, Y_part = partition(X,Y,attr_i,attr_poss)
                     n = len(Y_part)
 
                     if( len(Y_part) > 0 ):
-                        uniques, P = get_prob(Y_part)
+                        classes, P = get_prob(Y_part)
 
                         curr_entropy = calc_entropy(P)
                         curr_avg_entropy += (n/tot_n)*curr_entropy
@@ -183,14 +235,13 @@ class DecisionTree():
                         info_gain = (n/tot_n)*(base_entropy - curr_entropy)
 
                         if( ( (info_gain <= thresh) and (info_gain > 0)  ) or (curr_entropy == 0) ):
-                            maj_class = uniques[np.argmax(P)]
+                            maj_class = classes[np.argmax(P)]
                             curr_leaf_nodes[attr_poss] = maj_class
 
                     #Empty partition means no data points with value attr_pos for attribute attr_i
                     #node becomes leaf node with class of most probable class of parent
                     else:
-                        uniques , P = get_prob(Y)
-                        maj_class = uniques[np.argmax(P)]
+                        maj_class = base_classes[np.argmax(base_P)]
                         curr_leaf_nodes[attr_poss] = maj_class
 
                 if(curr_avg_entropy < min_entropy):
@@ -200,36 +251,55 @@ class DecisionTree():
 
             return best_attr, final_leaf_nodes
 
-        def build_tree(node,X,Y, attr_list, tokenizer, thresh):
+        def build_tree(node,X,Y, attr_list, thresh):
 
             #decision node class is majority class
-            uniques , P = get_prob(Y)
-            maj_class = uniques[np.argmax(P)]
+            classes , P = get_prob(Y)
+
+            maj_class = classes[np.argmax(P)]
             node.cla = maj_class
 
             attr_list = attr_list.copy()
 
-            best_attr, leaf_nodes = get_best_attr(X,Y,attr_list, tokenizer, thresh)
+            if(self.split_type == "equality"):
+                best_attr, leaf_nodes = get_best_attr(X,Y,attr_list, thresh)
+            else:
+                best_attr, best_thresh, leaf_nodes = get_best_attr_bin_split(X,Y,attr_list, thresh)
+                node.thresh = best_thresh
 
             node.attr_index = best_attr
-
             attr_list.remove(best_attr)
 
-            for i in tokenizer.getAttTokenVals(best_attr):
-                if(i in leaf_nodes):
-                    new_node = ClassificationNode(leaf_nodes[i])
-                else:
-                    new_node = DecisionNode()
-                    X_part, Y_part = partition(X,Y,best_attr,i)
-                    build_tree(new_node,X_part,Y_part,attr_list, tokenizer, thresh)
+            if( self.split_type == "equality" ):
+                for i in self.tokenizer.getAttTokenVals(best_attr):
+                    if(i in leaf_nodes):
+                        new_node = ClassificationNode(leaf_nodes[i])
+                    else:
+                        new_node = DecisionNode(split_type = self.split_type)
+                        X_part, Y_part = partition(X,Y,best_attr,i)
+                        build_tree(new_node,X_part,Y_part,attr_list, thresh)
+                    node.add_child(new_node)
+            else:
+                for i in [0,1]:
+                    if(i in leaf_nodes):
+                        new_node = ClassificationNode(leaf_nodes[i])
+                    else:
+                        new_node = DecisionNode(split_type = self.split_type)
+                        if(i == 0):
+                            X_part, Y_part = partition(X,Y,best_attr,node.thresh, type = "le")
+                        else:
+                            X_part, Y_part = partition(X,Y,best_attr,node.thresh, type = "g")
+                        build_tree(new_node,X_part,Y_part,attr_list, thresh)
 
-                node.add_child(new_node)
+                    node.add_child(new_node)
+
+        self.split_type = split_type
 
         attr_list = [ i for i in range(X.shape[1])]
 
-        self.root_node = DecisionNode()
-        self.root_node.parent = None
-        build_tree(self.root_node,X,Y,attr_list, tokenizer, thresh)
+        self.root_node = DecisionNode(split_type = split_type)
+        build_tree(self.root_node,X,Y,attr_list, thresh)
+        
         print("Done Building tree!")
 
     def replace_node(self, old_node, new_node):
@@ -304,16 +374,32 @@ class DecisionTree():
         return lp
 
     def __str__(self):
-        def strHelper(node, level = 0):
-            string = "\n" + "\t"*level +"-" +str(node)
-
+        def strHelperEqual(node, level = 0, prefix = ""):
             if(type(node) == DecisionNode):
+                string = "\n" + "\t"*level + prefix +" -> (DN) " + self.tokenizer.getAttrName(node.attr_index) + " = ?"
                 for i, child in enumerate(node.children):
-                    string += strHelper(child, level + 1)
-
+                    string += strHelperEqual(child, level + 1, tokenizer.convertToken2Word(i,node.attr_index) )
+            else:
+                string = "\n" + "\t"*level + prefix + " -> (CN) " + tokenizer.getAttrName(cla = True) + " " +  tokenizer.convertToken2Word(node.cla,  cla = True)
             return string
 
-        string = strHelper(self.root_node)
+        def strHelperInequal(node, level = 0, prefix = ""):
+            if(type(node) == DecisionNode):
+                string = "\n" + "\t"*level + prefix +" -> (DN) " + self.tokenizer.getAttrName(node.attr_index) + " = ?"
+                for i, child in enumerate(node.children):
+                    if(i == 0):
+                        string += strHelperInequal(child, level + 1, self.tokenizer.getAttrName(node.attr_index) + " <= " + tokenizer.convertToken2Word(node.thresh,node.attr_index)  )
+                    else:
+                        string += strHelperInequal(child, level + 1, self.tokenizer.getAttrName(node.attr_index) + " > " + tokenizer.convertToken2Word(node.thresh,node.attr_index)  )
+            else:
+                string = "\n" + "\t"*level + prefix + " -> (CN) " + tokenizer.getAttrName(cla = True) + " " +  tokenizer.convertToken2Word(node.cla,  cla = True)
+            return string
+
+        if(self.split_type == "equality"):
+            string = strHelperEqual(self.root_node)
+        else:
+            string = strHelperInequal(self.root_node)
+        
         return string
 
 def read_csv(path):
@@ -321,7 +407,6 @@ def read_csv(path):
         file = open(path)
     except:
         print("Error")
-
     lines = file.read().split('\n')
     result =  [line.split(",") for line in lines]
 
@@ -346,7 +431,7 @@ class Tokenizer():
         given attribute index, returns all of the possible integer values of that attribute, sorted
     """
 
-    def __init__(self, X, word2token = None):
+    def __init__(self, X, attr_names, word2token = None):
         """Defines an association between categories and integers.
 
         There are two approaches here:
@@ -367,6 +452,8 @@ class Tokenizer():
                 categories (keys) and integers (values) 
         """
 
+        self.attr_names = attr_names
+
         if word2token != None:
             self.word2token = word2token
             self.token2word = []
@@ -386,6 +473,15 @@ class Tokenizer():
                         self.word2token[c][curr_word] = token
                         self.token2word[c][token] = curr_word
                         token += 1
+
+    def getClassAttrI(self):
+        return len(self.attr_names) - 1 
+
+    def getAttrName(self, attr_i = None, cla = False):
+        if(cla):
+            return self.attr_names[self.getClassAttrI()]
+        else:
+            return self.attr_names[attr_i]
 
     def convertWord2token(self,X):
         """Converts data from categorical values to numerical values
@@ -412,6 +508,13 @@ class Tokenizer():
                 tokens[i,j] = self.word2token[j][X[i][j]]
 
         return tokens
+
+    def convertToken2Word(self, val,attr_i = None, cla = False ):
+        if(cla):
+            return self.token2word[self.getClassAttrI()][val]
+        else:
+            return self.token2word[attr_i][val]
+
 
     def getAttTokenVals(self, attr_i):
         """given attribute index, return all possible values sorted"""
@@ -503,10 +606,13 @@ if __name__  == "__main__":
 
     data = read_csv("car_evaluation.csv")
 
+    attr_names = { 0:"buying price", 1:"maintenance cost", 2:"number of doors", 3:"number of persons", 4:"lug boot", 5:"safety", 6:"decision" }
+
     word2token = [ {'low':0, 'med':1, 'high': 2, 'vhigh':3}, {'low':0, 'med':1, 'high': 2, 'vhigh':3}, {'2':0, '3':1, '4':2, '5more':3}, 
     {'2':0, '4':1, 'more':2}, {'small':0, 'med':1, 'big':2}, {'low':0, 'med':1, 'high':2}, {'unacc': 0, 'acc':1, 'good':2, 'vgood':3} ]
 
-    tokenizer = Tokenizer(data, word2token)
+
+    tokenizer = Tokenizer(data, attr_names, word2token)
     data_tokens = tokenizer.convertWord2token(data)
 
     """
@@ -545,10 +651,10 @@ if __name__  == "__main__":
     val_x, val_y = splitInputOutput(val_data)
     test_x, test_y = splitInputOutput(test_data)
 
-    decisionTree = DecisionTree()
+    decisionTree = DecisionTree(tokenizer)
 
     thresh = 0
-    decisionTree.learn(train_x, train_y, tokenizer, thresh)
+    decisionTree.learn(train_x, train_y, thresh, split_type = "inequality")
 
     uniques, P = get_prob(test_y)
 
